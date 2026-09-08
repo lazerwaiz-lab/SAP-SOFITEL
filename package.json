@@ -20,6 +20,6 @@
   "devDependencies": {
     "vite": "^5.0.0",
     "vite-plugin-html": "^3.2.2",
-    "vite-plugin-javascript-obfuscator": "^2.5.0"
+    "vite-plugin-javascript-obfuscator": "2.5.0"
   }
 }
