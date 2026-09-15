@@ -1,10 +1,12 @@
+require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const path = require('path');
+const multer = require('multer'); // <--- Indispensable pour l'upload
+const { createClient } = require('@supabase/supabase-js'); // <--- Indispensable pour Supabase
 const { initializeApp, cert } = require('firebase-admin/app');
 const { getFirestore } = require('firebase-admin/firestore');
-
-const serviceAccount = require(path.join(__dirname, 'serviceAccountKey.json'));
+const serviceAccount = require('./serviceAccountKey.json');
 
 initializeApp({
     credential: cert(serviceAccount)
@@ -16,6 +18,12 @@ const app = express();
 app.use(express.json({ limit: '10mb' }));
 app.use(cors());
 app.use(express.static(path.join(__dirname)));
+
+// Configuration de Multer (mémoire tampon)
+const upload = multer({ storage: multer.memoryStorage() });
+
+// Initialisation de Supabase (les variables doivent être configurées dans ton environnement Render ou ton .env)
+const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY);
 
 // Middleware de vérification d'authentification pour bloquer les écritures non autorisées
 const verifyAuthToken = async (req, res, next) => {
@@ -94,6 +102,38 @@ app.get('/api/staff/:id', async (req, res) => {
 
 app.get('/', (req, res) => {
     res.sendFile(path.join(__dirname, 'admin.html'));
+});
+
+// Route d'upload vers Supabase Storage
+app.post('/upload-photo', upload.single('photo'), async (req, res) => {
+    try {
+        if (!req.file) {
+            return res.status(400).json({ error: "Aucun fichier fourni." });
+        }
+
+        const fileExt = req.file.originalname.split('.').pop();
+        const fileName = `${Date.now()}_${Math.random().toString(36).substring(2)}.${fileExt}`;
+        const filePath = `staff-photos/${fileName}`;
+
+        // Assure-toi que 'staff-photos' correspond au nom exact de ton bucket Supabase
+        const { data, error } = await supabase.storage
+            .from('staff-photos') 
+            .upload(filePath, req.file.buffer, {
+                contentType: req.file.mimetype,
+                upsert: false
+            });
+
+        if (error) throw error;
+
+        const { data: publicUrlData } = supabase.storage
+            .from('staff-photos')
+            .getPublicUrl(filePath);
+
+        res.json({ url: publicUrlData.publicUrl });
+    } catch (err) {
+        console.error("Erreur Supabase Storage:", err);
+        res.status(500).json({ error: err.message });
+    }
 });
 
 app.listen(3005, () => {
