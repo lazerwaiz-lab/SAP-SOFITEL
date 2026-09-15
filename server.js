@@ -155,6 +155,7 @@ app.post('/upload-photo', upload.single('photo'), async (req, res) => {
     }
 });
 
-app.listen(3005, () => {
-    console.log('Serveur backend SAP démarré sur http://localhost:3005');
+const PORT = process.env.PORT || 3005;
+app.listen(PORT, () => {
+    console.log(`Serveur backend SAP démarré sur le port ${PORT}`);
 });
