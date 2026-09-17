@@ -41,7 +41,7 @@ app.use(express.static(path.join(__dirname)));
 // Configuration de Multer (mémoire tampon)
 const upload = multer({ storage: multer.memoryStorage() });
 
-// Initialisation de Supabase (les variables doivent être configurées dans ton environnement Render ou ton .env)
+// Initialisation de Supabase
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY);
 
 // Middleware de vérification d'authentification pour bloquer les écritures non autorisées
@@ -59,6 +59,30 @@ const verifyAuthToken = async (req, res, next) => {
     }
 };
 
+// ==========================================
+// NOUVEAU : ROUTE DE VÉRIFICATION DU MOT DE PASSE ADMIN POUR LE FRONT-END
+// ==========================================
+app.post('/api/verify-admin', async (req, res) => {
+    try {
+        const { password } = req.body;
+        const adminPassword = process.env.ADMIN_PASSWORD;
+
+        if (!adminPassword) {
+            return res.status(500).json({ success: false, message: "Configuration serveur incomplète (mot de passe admin manquant)." });
+        }
+
+        if (password !== adminPassword) {
+            return res.status(401).json({ success: false, message: "Mot de passe administrateur incorrect !" });
+        }
+
+        res.json({ success: true, message: "Mot de passe correct." });
+    } catch (error) {
+        console.error("Erreur vérification admin :", error);
+        res.status(500).json({ success: false, message: "Erreur serveur." });
+    }
+});
+
+
 // Route d'écriture / modification sécurisée
 app.post('/api/staff', verifyAuthToken, async (req, res) => {
     try {
@@ -70,13 +94,58 @@ app.post('/api/staff', verifyAuthToken, async (req, res) => {
     }
 });
 
-// Route de suppression sécurisée
-app.delete('/api/staff/:id', verifyAuthToken, async (req, res) => {
+// Route pour supprimer un employé et l'archiver dans 'sofitel_cotonou_staff_gone'
+app.delete('/api/staff/:id', async (req, res) => {
     try {
-        await db.collection('sofitel_cotonou_staff').doc(req.params.id).delete();
-        res.status(200).json({ success: true, message: "Employé supprimé avec succès." });
+        const { password } = req.body;
+        const adminPassword = process.env.ADMIN_PASSWORD;
+        
+        // Sécurisé avec process.env
+        if (!adminPassword || password !== adminPassword) {
+            return res.status(403).json({ 
+                success: false, 
+                message: "Accès refusé : mot de passe administrateur incorrect ou non configuré." 
+            });
+        }
+
+        const staffId = req.params.id;
+
+        const activeDocRef = db.collection('sofitel_cotonou_staff').doc(staffId);
+        const docSnap = await activeDocRef.get();
+
+        if (!docSnap.exists) {
+            return res.status(404).json({
+                success: false,
+                message: "Employé introuvable dans la base de données."
+            });
+        }
+
+        const staffData = docSnap.data();
+
+        const archiveData = {
+            ...staffData,
+            deletedAt: new Date().toISOString()
+        };
+
+        const archiveDocRef = db.collection('sofitel_cotonou_staff_gone').doc(staffId);
+
+        const batch = db.batch();
+        batch.set(archiveDocRef, archiveData); 
+        batch.delete(activeDocRef);            
+
+        await batch.commit();
+
+        res.json({ 
+            success: true, 
+            message: "Employé supprimé et archivé avec succès." 
+        });
+
     } catch (error) {
-        res.status(500).json({ error: error.message });
+        console.error("Erreur lors de la suppression/archivage :", error);
+        res.status(500).json({ 
+            success: false, 
+            message: "Erreur interne du serveur : " + error.message
+        });
     }
 });
 
@@ -134,7 +203,6 @@ app.post('/upload-photo', upload.single('photo'), async (req, res) => {
         const fileName = `${Date.now()}_${Math.random().toString(36).substring(2)}.${fileExt}`;
         const filePath = `staff-photos/${fileName}`;
 
-        // Assure-toi que 'staff-photos' correspond au nom exact de ton bucket Supabase
         const { data, error } = await supabase.storage
             .from('staff-photos') 
             .upload(filePath, req.file.buffer, {
@@ -152,6 +220,115 @@ app.post('/upload-photo', upload.single('photo'), async (req, res) => {
     } catch (err) {
         console.error("Erreur Supabase Storage:", err);
         res.status(500).json({ error: err.message });
+    }
+});
+
+// Route centralisée pour exécuter les actions sécurisées sur la base de données
+app.post('/api/executeDbAction', async (req, res) => {
+    try {
+        const { password, action, collection, id } = req.body;
+        const adminPassword = process.env.ADMIN_PASSWORD;
+
+        // 1. Vérification stricte du mot de passe administrateur sécurisé
+        if (!adminPassword || password !== adminPassword) {
+            return res.status(403).json({ 
+                success: false, 
+                message: "Accès refusé : mot de passe administrateur incorrect ou non configuré." 
+            });
+        }
+
+        // 2. Gestion des actions (ex: suppression)
+        if (action === 'delete') {
+            if (!collection || !id) {
+                return res.status(400).json({ success: false, message: "Paramètres manquants." });
+            }
+
+            // Correction : Utilisation de "db" à la place de "admin.firestore()"
+            await db.collection(collection).doc(id).delete();
+
+            return res.json({ 
+                success: true, 
+                message: "Suppression effectuée avec succès." 
+            });
+        }
+
+        res.status(400).json({ success: false, message: "Action inconnue." });
+
+    } catch (error) {
+        console.error("Erreur serveur executeDbAction :", error);
+        res.status(500).json({ 
+            success: false, 
+            message: "Erreur interne du serveur : " + error.message 
+        });
+    }
+});
+
+// 1. Récupérer la liste des utilisateurs supprimés (staff_gone)
+app.get('/api/staff-gone', async (req, res) => {
+    try {
+        const snapshot = await db.collection('sofitel_cotonou_staff_gone').get();
+        const staffList = [];
+        snapshot.forEach(doc => {
+            staffList.push({ id: doc.id, ...doc.data() });
+        });
+        res.json(staffList);
+    } catch (error) {
+        console.error("Erreur fetch staff-gone:", error);
+        res.status(500).json({ success: false, message: error.message });
+    }
+});
+
+// 2. Restaurer un utilisateur (le remettre dans staff et le supprimer de staff_gone)
+app.post('/api/staff/restore/:id', async (req, res) => {
+    try {
+        const { password } = req.body;
+        const adminPassword = process.env.ADMIN_PASSWORD;
+
+        // Sécurisé avec process.env
+        if (!adminPassword || password !== adminPassword) {
+            return res.status(401).json({ success: false, message: "Mot de passe administrateur incorrect." });
+        }
+
+        const staffId = req.params.id;
+        const goneDocRef = db.collection('sofitel_cotonou_staff_gone').doc(staffId);
+        const goneDoc = await goneDocRef.get();
+
+        if (!goneDoc.exists) {
+            return res.status(404).json({ success: false, message: "Utilisateur introuvable dans les archives." });
+        }
+
+        const staffData = goneDoc.data();
+        staffData.statut = 'active';
+        delete staffData.deletedAt;
+
+        await db.collection('sofitel_cotonou_staff').doc(staffId).set(staffData);
+        await goneDocRef.delete();
+
+        res.json({ success: true, message: "Utilisateur restauré avec succès." });
+    } catch (error) {
+        console.error("Erreur restore:", error);
+        res.status(500).json({ success: false, message: error.message });
+    }
+});
+
+// 3. Supprimer définitivement un utilisateur de staff_gone
+app.delete('/api/staff-gone/:id', async (req, res) => {
+    try {
+        const { password } = req.body;
+        const adminPassword = process.env.ADMIN_PASSWORD;
+
+        // Sécurisé avec process.env
+        if (!adminPassword || password !== adminPassword) {
+            return res.status(401).json({ success: false, message: "Mot de passe administrateur incorrect." });
+        }
+
+        const staffId = req.params.id;
+        await db.collection('sofitel_cotonou_staff_gone').doc(staffId).delete();
+
+        res.json({ success: true, message: "Utilisateur supprimé définitivement." });
+    } catch (error) {
+        console.error("Erreur permanent delete:", error);
+        res.status(500).json({ success: false, message: error.message });
     }
 });
 
