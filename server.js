@@ -60,7 +60,7 @@ const verifyAuthToken = async (req, res, next) => {
 };
 
 // ==========================================
-// NOUVEAU : ROUTE DE VÉRIFICATION DU MOT DE PASSE ADMIN POUR LE FRONT-END
+// ROUTE DE VÉRIFICATION DU MOT DE PASSE ADMIN
 // ==========================================
 app.post('/api/verify-admin', async (req, res) => {
     try {
@@ -82,15 +82,100 @@ app.post('/api/verify-admin', async (req, res) => {
     }
 });
 
-
-// Route d'écriture / modification sécurisée
+// ==========================================
+// ROUTE D'ÉCRITURE / MODIFICATION SÉCURISÉE (Staff)
+// Avec anti-doublons stricts et gestion propre du changement de matricule
+// ==========================================
 app.post('/api/staff', verifyAuthToken, async (req, res) => {
     try {
-        const { id, ...data } = req.body;
-        await db.collection('sofitel_cotonou_staff').doc(id).set(data);
-        res.status(200).json({ success: true, message: "Employé enregistré avec succès." });
+        const { id, force, ...data } = req.body;
+        
+        if (!id) {
+            return res.status(400).json({ success: false, error: "ID de l'employé manquant." });
+        }
+
+        const sftIdToCheck = (id || '').trim();
+        const nomToCheck = (data.nom || '').trim().toLowerCase();
+        const prenomToCheck = (data.prenom || '').trim().toLowerCase();
+
+        // 1. Vérification si le matricule exact existe déjà
+        const docRef = db.collection('sofitel_cotonou_staff').doc(id);
+        const docSnap = await docRef.get();
+
+        if (docSnap.exists && !force) {
+            const existingData = docSnap.data();
+            // On renvoie un 200 avec conflict: true pour garder la console propre
+            return res.status(200).json({ 
+                success: false, 
+                conflict: true,
+                existingMatricule: id,
+                existingName: `${existingData.nom || ''} ${existingData.prenom || ''}`.trim(),
+                error: `Le matricule "${id}" existe déjà pour ${existingData.nom} ${existingData.prenom}.` 
+            });
+        }
+
+        // 2. Vérification des doublons de Nom & Prénom sur les autres documents
+        const snapshot = await db.collection('sofitel_cotonou_staff').get();
+        let oldDocRefToClean = null;
+        let creationDate = new Date().toISOString();
+
+        for (const doc of snapshot.docs) {
+            const existingData = doc.data();
+            const existingNom = (existingData.nom || '').trim().toLowerCase();
+            const existingPrenom = (existingData.prenom || '').trim().toLowerCase();
+
+            if (nomToCheck && prenomToCheck && existingNom === nomToCheck && existingPrenom === prenomToCheck) {
+                if (doc.id !== id) {
+                    oldDocRefToClean = doc.ref; 
+                    if (existingData.createdAt) {
+                        creationDate = existingData.createdAt; 
+                    }
+                } else if (docSnap.exists && docSnap.data().createdAt) {
+                    creationDate = docSnap.data().createdAt;
+                }
+
+                if (!force && doc.id !== id) {
+                    return res.status(200).json({ 
+                        success: false, 
+                        conflict: true,
+                        existingMatricule: doc.id,
+                        existingName: `${existingData.nom || ''} ${existingData.prenom || ''}`.trim(),
+                        error: `L'employé existe déjà sous un autre matricule.` 
+                    });
+                }
+            }
+        }
+
+        // 3. Construction des données de l'employé
+        const staffPayload = {
+            sftId: id,
+            nom: data.nom || '',
+            prenom: data.prenom || '',
+            genre: data.genre || 'M',
+            email: data.email || '',
+            phone: data.phone || '',
+            phoneCode: data.phoneCode || '',
+            departement: data.departement || '',
+            Conduite: data.Conduite || 'Non',
+            hotel: data.hotel || 'Sofitel Cotonou Marina',
+            statut: data.statut || 'active',
+            photo: data.photo || '',
+            qrCode: data.qrCode || '',
+            createdAt: creationDate,
+            updatedAt: new Date().toISOString()
+        };
+
+        await docRef.set(staffPayload);
+
+        if (oldDocRefToClean && oldDocRefToClean.id !== id) {
+            await oldDocRefToClean.delete();
+        }
+
+        res.status(200).json({ success: true, message: "Employé enregistré et mis à jour avec succès." });
+        
     } catch (error) {
-        res.status(500).json({ error: error.message });
+        // Les vraies erreurs techniques (crash serveur, pblm Firestore) écriront dans les logs serveur, masquées pour le client
+        res.status(500).json({ success: false, error: "Erreur interne du serveur." });
     }
 });
 
@@ -100,7 +185,6 @@ app.delete('/api/staff/:id', async (req, res) => {
         const { password } = req.body;
         const adminPassword = process.env.ADMIN_PASSWORD;
         
-        // Sécurisé avec process.env
         if (!adminPassword || password !== adminPassword) {
             return res.status(403).json({ 
                 success: false, 
@@ -109,7 +193,6 @@ app.delete('/api/staff/:id', async (req, res) => {
         }
 
         const staffId = req.params.id;
-
         const activeDocRef = db.collection('sofitel_cotonou_staff').doc(staffId);
         const docSnap = await activeDocRef.get();
 
@@ -121,14 +204,12 @@ app.delete('/api/staff/:id', async (req, res) => {
         }
 
         const staffData = docSnap.data();
-
         const archiveData = {
             ...staffData,
             deletedAt: new Date().toISOString()
         };
 
         const archiveDocRef = db.collection('sofitel_cotonou_staff_gone').doc(staffId);
-
         const batch = db.batch();
         batch.set(archiveDocRef, archiveData); 
         batch.delete(activeDocRef);            
@@ -149,7 +230,7 @@ app.delete('/api/staff/:id', async (req, res) => {
     }
 });
 
-// Route pour récupérer tous les employés (pour le tableau de bord admin)
+// Route pour récupérer tous les employés
 app.get('/api/staff', async (req, res) => {
     try {
         const snapshot = await db.collection('sofitel_cotonou_staff').get();
@@ -163,7 +244,7 @@ app.get('/api/staff', async (req, res) => {
     }
 });
 
-// Route pour récupérer un employé spécifique par son ID ou sftId (pour le scanner)
+// Route pour récupérer un employé spécifique par son ID ou sftId
 app.get('/api/staff/:id', async (req, res) => {
     try {
         const searchId = decodeURIComponent(req.params.id).trim();
@@ -229,7 +310,6 @@ app.post('/api/executeDbAction', async (req, res) => {
         const { password, action, collection, id } = req.body;
         const adminPassword = process.env.ADMIN_PASSWORD;
 
-        // 1. Vérification stricte du mot de passe administrateur sécurisé
         if (!adminPassword || password !== adminPassword) {
             return res.status(403).json({ 
                 success: false, 
@@ -237,13 +317,11 @@ app.post('/api/executeDbAction', async (req, res) => {
             });
         }
 
-        // 2. Gestion des actions (ex: suppression)
         if (action === 'delete') {
             if (!collection || !id) {
                 return res.status(400).json({ success: false, message: "Paramètres manquants." });
             }
 
-            // Correction : Utilisation de "db" à la place de "admin.firestore()"
             await db.collection(collection).doc(id).delete();
 
             return res.json({ 
@@ -278,13 +356,12 @@ app.get('/api/staff-gone', async (req, res) => {
     }
 });
 
-// 2. Restaurer un utilisateur (le remettre dans staff et le supprimer de staff_gone)
+// 2. Restaurer un utilisateur
 app.post('/api/staff/restore/:id', async (req, res) => {
     try {
         const { password } = req.body;
         const adminPassword = process.env.ADMIN_PASSWORD;
 
-        // Sécurisé avec process.env
         if (!adminPassword || password !== adminPassword) {
             return res.status(401).json({ success: false, message: "Mot de passe administrateur incorrect." });
         }
@@ -317,7 +394,6 @@ app.delete('/api/staff-gone/:id', async (req, res) => {
         const { password } = req.body;
         const adminPassword = process.env.ADMIN_PASSWORD;
 
-        // Sécurisé avec process.env
         if (!adminPassword || password !== adminPassword) {
             return res.status(401).json({ success: false, message: "Mot de passe administrateur incorrect." });
         }
