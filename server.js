@@ -481,7 +481,12 @@ app.delete('/api/staff-gone/:id', async (req, res) => {
     }
 });
 
+// Si ton fichier s'appelle admin_5.html ou admin.html :
+app.get('/admin', (req, res) => {
+    res.sendFile(path.join(__dirname, 'admin.html')); 
+});
+
 const PORT = process.env.PORT || 3005;
 app.listen(PORT, () => {
-    console.log(`Serveur backend SAP démarré sur le port ${PORT}`);
+    console.log(`🚀Serveur backend SAP démarré sur le port ${PORT}`);
 });
