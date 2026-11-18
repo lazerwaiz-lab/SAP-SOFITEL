@@ -273,22 +273,46 @@ app.get('/', (req, res) => {
     res.sendFile(path.join(__dirname, 'admin.html'));
 });
 
-// Route d'upload vers Supabase Storage
+// Route d'upload vers Supabase Storage (format prenom_nom_matricule.ext)
 app.post('/upload-photo', upload.single('photo'), async (req, res) => {
     try {
         if (!req.file) {
             return res.status(400).json({ error: "Aucun fichier fourni." });
         }
 
+        // Récupération des champs envoyés par le frontend
+        const rawPrenom = req.body.prenom || 'employe';
+        const rawNom = req.body.nom || '';
+        const rawMatricule = req.body.matricule || 'SFT-0000';
+
+        // Fonction de nettoyage des caractères spéciaux et des accents
+        const sanitize = (str) => {
+            return str
+                .normalize('NFD')
+                .replace(/[\u0300-\u036f]/g, '')
+                .toLowerCase()
+                .replace(/[^a-z0-9]/g, '_')
+                .replace(/_+/g, '_') // Évite les doubles underscores
+                .replace(/^_|_$/g, ''); // Supprime les underscores au début/fin
+        };
+
+        const cleanPrenom = sanitize(rawPrenom);
+        const cleanNom = sanitize(rawNom);
+        const cleanMatricule = sanitize(rawMatricule);
+
         const fileExt = req.file.originalname.split('.').pop();
-        const fileName = `${Date.now()}_${Math.random().toString(36).substring(2)}.${fileExt}`;
+        
+        // Format final : prenom_nom_matricule.ext (ex: severin_bosse_sft_a599400q699z.jpg)
+        const fileName = `${cleanPrenom}_${cleanNom}_${cleanMatricule}.${fileExt}`;
         const filePath = `staff-photos/${fileName}`;
+
+        console.log(`📤 Upload vers Supabase du fichier : ${filePath}`);
 
         const { data, error } = await supabase.storage
             .from('staff-photos') 
             .upload(filePath, req.file.buffer, {
                 contentType: req.file.mimetype,
-                upsert: false
+                upsert: true // Écrase l'ancienne photo si elle existe déjà pour cet employé
             });
 
         if (error) throw error;
@@ -299,7 +323,7 @@ app.post('/upload-photo', upload.single('photo'), async (req, res) => {
 
         res.json({ url: publicUrlData.publicUrl });
     } catch (err) {
-        console.error("Erreur Supabase Storage:", err);
+        console.error("❌ Erreur Supabase Storage:", err);
         res.status(500).json({ error: err.message });
     }
 });
@@ -388,7 +412,7 @@ app.post('/api/staff/restore/:id', async (req, res) => {
     }
 });
 
-// 3. Supprimer définitivement un utilisateur de staff_gone
+// 3. Supprimer définitivement un utilisateur de staff_gone (Supabase & Firestore)
 app.delete('/api/staff-gone/:id', async (req, res) => {
     try {
         const { password } = req.body;
@@ -399,11 +423,60 @@ app.delete('/api/staff-gone/:id', async (req, res) => {
         }
 
         const staffId = req.params.id;
-        await db.collection('sofitel_cotonou_staff_gone').doc(staffId).delete();
+        const docRef = db.collection('sofitel_cotonou_staff_gone').doc(staffId);
+        const docSnap = await docRef.get();
 
-        res.json({ success: true, message: "Utilisateur supprimé définitivement." });
+        if (!docSnap.exists) {
+            return res.status(404).json({ success: false, message: "Utilisateur introuvable dans les archives." });
+        }
+
+        const staffData = docSnap.data();
+
+        // 🗑️ ÉTAPE 1 : SUPPRESSION SUR SUPABASE STORAGE
+        if (staffData.photo && staffData.photo.includes('supabase.co')) {
+            try {
+                // Extraction du chemin relatif depuis l'URL publique
+                const urlObj = new URL(staffData.photo);
+                const pathSegments = urlObj.pathname.split('/public/staff-photos/');
+                
+                if (pathSegments.length > 1) {
+                    let relativePath = decodeURIComponent(pathSegments[1].split('?')[0]);
+                    
+                    // Si le fichier est dans le sous-dossier staff-photos du bucket
+                    if (!relativePath.startsWith('staff-photos/')) {
+                        relativePath = `staff-photos/${relativePath}`;
+                    }
+
+                    console.log(`🗑️ Suppression dans Supabase du chemin : ${relativePath}`);
+                    
+                    const { data, error: supabaseError } = await supabase.storage
+                        .from('staff-photos')
+                        .remove([relativePath]);
+
+                    if (supabaseError) {
+                        console.error("❌ Échec Supabase Storage :", supabaseError);
+                        return res.status(500).json({ 
+                            success: false, 
+                            message: "Échec de la suppression du média sur Supabase : " + supabaseError.message 
+                        });
+                    }
+                    console.log("✅ Fichier supprimé avec succès de Supabase :", data);
+                }
+            } catch (storageErr) {
+                console.error("❌ Erreur technique Supabase :", storageErr);
+                return res.status(500).json({ 
+                    success: false, 
+                    message: "Erreur lors du traitement du fichier distant sur Supabase." 
+                });
+            }
+        }
+
+        // ÉTAPE 2 : SUPPRESSION DANS FIRESTORE
+        await docRef.delete();
+
+        res.json({ success: true, message: "Média sur Supabase et utilisateur supprimés définitivement avec succès." });
     } catch (error) {
-        console.error("Erreur permanent delete:", error);
+        console.error("❌ Erreur permanent delete:", error);
         res.status(500).json({ success: false, message: error.message });
     }
 });
